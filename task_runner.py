@@ -1,5 +1,8 @@
 from ledger import init_db, create_run, create_event, register_artifact, compute_file_hash
 
+def planner():
+    return True
+
 def replay_run(run_id):
     import sqlite3
 
@@ -12,7 +15,6 @@ def replay_run(run_id):
     )
 
     rows = cursor.fetchall()
-
     conn.close()
 
     for r in rows:
@@ -40,7 +42,7 @@ def run_task():
     })
 
     # --- DECISION GATE ---
-    should_execute = True  # (will be replaced by planner later)
+    should_execute = planner()
 
     create_event(run_id, "decision_made", {
         "execute": should_execute
