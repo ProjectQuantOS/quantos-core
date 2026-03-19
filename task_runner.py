@@ -3,6 +3,9 @@ from ledger import init_db, create_run, create_event, register_artifact, compute
 def planner():
     return True
 
+def reviewer(decision):
+    return decision
+
 def replay_run(run_id):
     import sqlite3
 
@@ -42,7 +45,8 @@ def run_task():
     })
 
     # --- DECISION GATE ---
-    should_execute = planner()
+    decision = planner()
+    should_execute = reviewer(decision)
 
     create_event(run_id, "decision_made", {
         "execute": should_execute
