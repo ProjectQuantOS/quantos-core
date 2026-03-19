@@ -6,6 +6,9 @@ def planner():
 def reviewer(decision):
     return decision
 
+def arbiter(decision):
+    return decision
+
 def replay_run(run_id):
     import sqlite3
 
@@ -46,11 +49,13 @@ def run_task():
 
     # --- DECISION GATE ---
     decision = planner()
-    should_execute = reviewer(decision)
+    create_event(run_id, "planner_decision", {"execute": decision})
 
-    create_event(run_id, "decision_made", {
-        "execute": should_execute
-    })
+    reviewed = reviewer(decision)
+    create_event(run_id, "reviewer_decision", {"execute": reviewed})
+
+    should_execute = arbiter(reviewed)
+    create_event(run_id, "arbiter_decision", {"execute": should_execute})
 
     if not should_execute:
         create_event(run_id, "task_skipped", {})
