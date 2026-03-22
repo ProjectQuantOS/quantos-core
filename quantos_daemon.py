@@ -166,7 +166,6 @@ def compute_intent_hash(task_name, rationale):
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
-
 def intent_already_executed_successfully(cursor, intent_hash):
     """
     Hard skip gate — the ONLY condition that prevents re-execution.
@@ -1105,10 +1104,7 @@ if __name__ == "__main__":
 
                     if healing_count >= MAX_RETRIES:
                         # ── ESCALATION CHECK (syntax failure path) ──
-                        if (
-                            task.get("difficulty", 0) >= 4
-                            and not already_escalated
-                        ):
+                        if task.get("difficulty", 0) >= 4 and not already_escalated:
                             already_escalated = True
                             print(
                                 f"[HEALING] Escalating to {ESCALATION_CODER}. "
@@ -1184,10 +1180,7 @@ if __name__ == "__main__":
 
                 if healing_count >= MAX_RETRIES:
                     # ── ESCALATION CHECK (execution gate failure path) ──
-                    if (
-                        task.get("difficulty", 0) >= 4
-                        and not already_escalated
-                    ):
+                    if task.get("difficulty", 0) >= 4 and not already_escalated:
                         already_escalated = True
                         print(
                             f"[HEALING] Escalating to {ESCALATION_CODER}. "
@@ -1306,10 +1299,7 @@ if __name__ == "__main__":
         except urllib.error.HTTPError as e:
             request_id = ""
             try:
-                request_id = (
-                    e.headers.get("x-request-id", "")
-                    or e.headers.get("request-id", "")
-                )
+                request_id = e.headers.get("x-request-id", "") or e.headers.get("request-id", "")
             except Exception:
                 pass
             error_payload = format_http_error(e)
