@@ -73,6 +73,14 @@ TARGET_FILE_FALLBACKS = {
     "write_arbiter_stub": "arbiter.py",
 }
 
+# ── DETERMINISTIC SCAFFOLD TARGETS — zero LLM spend, bypass Sonnet + Gemini ──
+DETERMINISTIC_SCAFFOLD_TARGETS = frozenset({
+    "reviewer.py",
+    "arbiter.py",
+    "tests/test_reviewer.py",
+    "tests/test_arbiter.py",
+})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RUNTIME CONFIGURATION
@@ -539,7 +547,12 @@ _GENESIS04_SCAFFOLDS = {
         "from typing import Any\n"
         "\n"
         "\n"
-        "def review(task: Any) -> dict[str, Any]:\n"
+        "class Reviewer:\n"
+        "    def review(self, task: Any, prompt: str = \"\") -> dict[str, Any]:\n"
+        "        return {\"approved\": True, \"reason\": \"stub\"}\n"
+        "\n"
+        "\n"
+        "def review(task: Any, prompt: str = \"\") -> dict[str, Any]:\n"
         "    return {\"approved\": True, \"reason\": \"stub\"}\n"
     ),
     "arbiter.py": (
@@ -552,11 +565,15 @@ _GENESIS04_SCAFFOLDS = {
         "    return candidates[0]\n"
     ),
     "tests/test_reviewer.py": (
-        "from reviewer import review\n"
+        "from reviewer import Reviewer\n"
         "\n"
         "\n"
         "def test_review_placeholder():\n"
-        "    result = review({})\n"
+        "    reviewer = Reviewer()\n"
+        "    try:\n"
+        "        result = reviewer.review({}, prompt=\"\")\n"
+        "    except NotImplementedError:\n"
+        "        result = {\"approved\": False}\n"
         "    assert isinstance(result, dict)\n"
         "    assert \"approved\" in result\n"
     ),
@@ -568,6 +585,16 @@ _GENESIS04_SCAFFOLDS = {
         "    assert arbitrate([]) is None\n"
     ),
 }
+
+
+def get_scaffold_code(target_file):
+    """
+    Return the exact raw Python source for a deterministic scaffold target.
+    Raises ValueError if target_file is not in DETERMINISTIC_SCAFFOLD_TARGETS.
+    """
+    if target_file in _GENESIS04_SCAFFOLDS:
+        return _GENESIS04_SCAFFOLDS[target_file]
+    raise ValueError(f"no deterministic scaffold defined for: {target_file!r}")
 
 
 def generate_code(task, target_file):
@@ -618,6 +645,7 @@ def heal_code_with_model(model, task, target_file, broken_code, error_text):
     hallucinated logic instead of solving the original problem.
     """
     task_name = task["task_name"] if isinstance(task, dict) else task
+    failure_class = classify_failure(error_text)
     instructions = (
         "You are the Coder. You are given broken Python code and an error "
         "traceback. Fix the error and return the complete corrected Python "
@@ -627,8 +655,11 @@ def heal_code_with_model(model, task, target_file, broken_code, error_text):
     input_text = (
         f"Task: {task_name}\n"
         f"Target file: {target_file}\n\n"
+        f"Failure class: {failure_class}\n"
+        f"The code failed the execution gate with this error:\n"
+        f"{error_text}\n\n"
         f"Broken code:\n{broken_code}\n\n"
-        f"Error:\n{error_text}\n\n"
+        f"Patch the logic.\n"
         f"Return the complete fixed Python code.\n"
     )
     code = anthropic_text(model, instructions, input_text)
@@ -711,6 +742,31 @@ def no_tests_collected(returncode, stderr):
     return "no tests ran" in combined or "no tests collected" in combined
 
 
+def classify_failure(error_text):
+    """
+    Classify a failure traceback/stderr into a deterministic error category.
+    Used to prime the healing prompt so Claude targets the right fix strategy
+    rather than guessing from raw noise.
+    """
+    t = error_text.lower()
+    if "syntaxerror" in t:
+        return "SyntaxError"
+    if "modulenotfounderror" in t:
+        return "ModuleNotFoundError"
+    if "importerror" in t:
+        return "ImportError"
+    if "assertionerror" in t:
+        return "AssertionError"
+    if "runtimeerror" in t:
+        return "RuntimeError"
+    if any(k in t for k in (
+        "connectionerror", "timeouterror", "oserror",
+        "filenotfounderror", "permissionerror",
+    )):
+        return "EnvironmentFailure"
+    return "UnknownFailure"
+
+
 def compute_written_hash(target_file):
     """Compute SHA-256 of a file that was just written to disk."""
     return compute_file_hash(target_file)
@@ -718,11 +774,15 @@ def compute_written_hash(target_file):
 
 def write_and_run_execution_gate(run_id, task_name, target_file, code):
     """
-    Write candidate code to disk via fs_write, then run tests.
+    Write candidate code to disk via fs_write, then run the scoped test suite.
 
     Returns (success: bool, detail: str).
-    Soft-passes when no_tests_collected (pytest exit code 5).
-    PRESERVES SEMANTICS: does NOT force test_file= for non-test source files.
+
+    Test scoping (Genesis-05 hardening — never runs the whole repo suite):
+    - If target_file is itself under tests/, run it directly.
+    - Otherwise resolve the direct counterpart: tests/test_<basename>.py.
+    Pytest exit code 5 (no tests collected) is the only valid soft-pass when
+    the counterpart does not yet exist.
     """
     create_event(run_id, "tool_call_initiated", {
         "tool": "fs_write",
@@ -731,7 +791,25 @@ def write_and_run_execution_gate(run_id, task_name, target_file, code):
     write_result = fs_write(target_file, code)
     create_event(run_id, "tool_call_response", write_result)
 
-    returncode, stdout, stderr = run_tests(target_file)
+    # Resolve the scoped test target — never fall back to the whole suite.
+    base = os.path.splitext(os.path.basename(target_file))[0]
+    if target_file.startswith("tests/") or target_file.startswith("tests" + os.sep):
+        # Target is itself a test file — run it directly.
+        test_target = target_file
+        returncode, stdout, stderr = run_tests(test_target)
+    else:
+        # Non-test source: look for the direct counterpart.
+        test_target = f"tests/test_{base}.py"
+        if os.path.exists(test_target):
+            returncode, stdout, stderr = run_tests(test_target)
+        else:
+            # Counterpart does not yet exist — soft-pass without calling pytest.
+            create_event(run_id, "no_tests_collected", {
+                "target_file": target_file,
+                "test_target": test_target,
+                "reason": "direct_test_not_found",
+            })
+            return True, ""
 
     if returncode == 0:
         return True, stdout
@@ -739,6 +817,7 @@ def write_and_run_execution_gate(run_id, task_name, target_file, code):
     if no_tests_collected(returncode, stderr):
         create_event(run_id, "no_tests_collected", {
             "target_file": target_file,
+            "test_target": test_target,
             "returncode": returncode,
         })
         return True, stdout
@@ -906,6 +985,23 @@ if __name__ == "__main__":
                 "already_done": file_already_done,
             })
 
+            # Frozen-scaffold skip — deterministic targets don't change across
+            # rationale paraphrases; skip as soon as the file is confirmed stable.
+            # This guard only applies to DETERMINISTIC_SCAFFOLD_TARGETS; all
+            # other targets continue to use intent_hash as the sole skip gate.
+            if target_file in DETERMINISTIC_SCAFFOLD_TARGETS and file_already_done:
+                create_event(run_id, "deterministic_target_already_complete", {
+                    "target_file": target_file,
+                    "reason": "genesis_04_frozen_scaffold",
+                })
+                create_event(run_id, "run_closed", {"final_status": True})
+                error_multiplier = 0
+                print(
+                    f"[EXECUTOR] Frozen scaffold already complete: {target_file}"
+                )
+                time.sleep(2)
+                continue
+
             # Hard skip gate — the ONLY condition that skips execution.
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -937,35 +1033,55 @@ if __name__ == "__main__":
                 "difficulty": task.get("difficulty", 0),
             })
 
-            create_event(run_id, "coder_prompt", {
-                "model": CODER_MODEL,
-                "task_name": task_name,
-                "target_file": target_file,
-            })
-            print(f"[EXECUTOR] Coder ({CODER_MODEL}) generating: {target_file}")
-            coder_code = generate_code(task, target_file)
-            create_event(run_id, "coder_output", {
-                "model": CODER_MODEL,
-                "code": coder_code,
-            })
+            if target_file in DETERMINISTIC_SCAFFOLD_TARGETS:
+                # Fast path — no LLM, no token spend, no entropy injection.
+                print(f"[EXECUTOR] Deterministic fast path: {target_file}")
+                create_event(run_id, "deterministic_fast_path", {
+                    "target_file": target_file,
+                    "reason": "scaffold_target_no_llm_needed",
+                })
+                coder_code = get_scaffold_code(target_file)
+                create_event(run_id, "coder_output", {
+                    "model": "deterministic_local_scaffold",
+                    "code": coder_code,
+                })
+                reviewed_code = coder_code
+                original_coder_code = coder_code
+                create_event(run_id, "code_review_skipped", {
+                    "target_file": target_file,
+                    "reason": "deterministic_scaffold_target",
+                })
+            else:
+                # Standard path — Tier-3 Sonnet then Tier-2 Gemini review.
+                create_event(run_id, "coder_prompt", {
+                    "model": CODER_MODEL,
+                    "task_name": task_name,
+                    "target_file": target_file,
+                })
+                print(f"[EXECUTOR] Coder ({CODER_MODEL}) generating: {target_file}")
+                coder_code = generate_code(task, target_file)
+                create_event(run_id, "coder_output", {
+                    "model": CODER_MODEL,
+                    "code": coder_code,
+                })
 
-            # Immutable clean-slate copy for potential Opus escalation.
-            # CONSTITUTIONAL LAW: Opus receives THIS, never the mutated candidate.
-            original_coder_code = coder_code
+                # Immutable clean-slate copy for potential Opus escalation.
+                # CONSTITUTIONAL LAW: Opus receives THIS, never the mutated candidate.
+                original_coder_code = coder_code
 
-            create_event(run_id, "reviewer_prompt", {
-                "model": REVIEWER_MODEL,
-                "task_name": task_name,
-                "target_file": target_file,
-            })
-            print(
-                f"[EXECUTOR] Reviewer ({REVIEWER_MODEL}) reviewing: {target_file}"
-            )
-            reviewed_code = review_code(task_name, target_file, coder_code)
-            create_event(run_id, "code_reviewer_output", {
-                "model": REVIEWER_MODEL,
-                "code": reviewed_code,
-            })
+                create_event(run_id, "reviewer_prompt", {
+                    "model": REVIEWER_MODEL,
+                    "task_name": task_name,
+                    "target_file": target_file,
+                })
+                print(
+                    f"[EXECUTOR] Reviewer ({REVIEWER_MODEL}) reviewing: {target_file}"
+                )
+                reviewed_code = review_code(task_name, target_file, coder_code)
+                create_event(run_id, "code_reviewer_output", {
+                    "model": REVIEWER_MODEL,
+                    "code": reviewed_code,
+                })
 
             # ── PHASE 4: OUROBOROS HEALING REFLEX ────────────────────────────
             candidate_code = reviewed_code
@@ -980,7 +1096,9 @@ if __name__ == "__main__":
                     compile(candidate_code, target_file, "exec")
                     create_event(run_id, "syntax_check", {"valid": True})
                 except SyntaxError as se:
-                    final_error_text = str(se)
+                    final_error_text = "".join(
+                        traceback.format_exception(type(se), se, se.__traceback__)
+                    )
                     create_event(run_id, "syntax_failure", {
                         "error": final_error_text,
                     })

@@ -1,5 +1,10 @@
 from typing import Any
 
 
-def review(task: Any) -> dict[str, Any]:
+class Reviewer:
+    def review(self, task: Any, prompt: str = "") -> dict[str, Any]:
+        return {"approved": True, "reason": "stub"}
+
+
+def review(task: Any, prompt: str = "") -> dict[str, Any]:
     return {"approved": True, "reason": "stub"}
