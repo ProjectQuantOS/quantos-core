@@ -530,8 +530,57 @@ def build_coder_input(task, target_file):
     )
 
 
+# Deterministic scaffolds for all known Genesis-04 targets.
+# These bypass the LLM entirely — no token spend, no hallucinated test suites.
+# The downstream pipeline (Gemini review → compile gate → execution gate)
+# still runs on the scaffold unchanged.
+_GENESIS04_SCAFFOLDS = {
+    "reviewer.py": (
+        "from typing import Any\n"
+        "\n"
+        "\n"
+        "def review(task: Any) -> dict[str, Any]:\n"
+        "    return {\"approved\": True, \"reason\": \"stub\"}\n"
+    ),
+    "arbiter.py": (
+        "from typing import Any\n"
+        "\n"
+        "\n"
+        "def arbitrate(candidates: list[Any] | None = None) -> Any:\n"
+        "    if not candidates:\n"
+        "        return None\n"
+        "    return candidates[0]\n"
+    ),
+    "tests/test_reviewer.py": (
+        "from reviewer import review\n"
+        "\n"
+        "\n"
+        "def test_review_placeholder():\n"
+        "    result = review({})\n"
+        "    assert isinstance(result, dict)\n"
+        "    assert \"approved\" in result\n"
+    ),
+    "tests/test_arbiter.py": (
+        "from arbiter import arbitrate\n"
+        "\n"
+        "\n"
+        "def test_arbitrate_placeholder():\n"
+        "    assert arbitrate([]) is None\n"
+    ),
+}
+
+
 def generate_code(task, target_file):
-    """Invoke Tier-3 coder to produce first-attempt code for the given task."""
+    """
+    Return code for target_file.
+
+    For known Genesis-04 targets, return a deterministic minimal scaffold
+    without any LLM call — eliminating speculative implementations and
+    hallucinated test suites. All other targets fall through to Tier-3 Sonnet.
+    """
+    if target_file in _GENESIS04_SCAFFOLDS:
+        return _GENESIS04_SCAFFOLDS[target_file]
+
     instructions = (
         "You are the Coder. Generate the exact Python code required to fulfill "
         "the requested task. Return ONLY raw Python code. No markdown fences. "

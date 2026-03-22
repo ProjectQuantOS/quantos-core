@@ -3,3 +3,5 @@ quantos.db
 *.sqlite
 __pycache__/
 *.pyc
+
+HALT_LOCK.flag
